@@ -13,3 +13,4 @@ __pycache__/
 *.pyzwzw
 dataset/
 model/
+project_templates/
