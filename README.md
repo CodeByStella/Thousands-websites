@@ -34,8 +34,8 @@ python src/train.py
 ├── src/
 │   ├── train.py              # Main training script
 │   ├── dataset_build.py      # Dataset update script
-│   ├── formatting.py
-│   └── test_model.py
+│   ├── test_base_model.py    # Test base model chatbot
+│   └── test_trained_model.py # Test trained model chatbot
 ├── notebooks/
 │   └── notebook.ipynb        # Colab notebook
 ├── dataset/                  # Cloned from Hugging Face
@@ -86,6 +86,24 @@ pip freeze > requirements.txt
 # Update dependencies
 pip install --upgrade -r requirements.txt
 ```
+
+## Testing Models
+
+**Test base model (interactive chatbot):**
+```bash
+python src/test_base_model.py
+```
+
+**Test trained model (interactive chatbot):**
+```bash
+# From Hugging Face Hub
+python src/test_trained_model.py
+
+# From local cloned model
+python src/test_trained_model.py --local
+```
+
+Both scripts provide an interactive chatbot interface. Type your prompts and get responses from the model. Use `quit` or `exit` to end the conversation.
 
 ## Training Configuration
 

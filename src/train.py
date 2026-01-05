@@ -10,8 +10,6 @@ from transformers import (
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from datasets import load_dataset
 import torch
-from torch.utils.data import Dataset
-import json
 import os
 import warnings
 import time
@@ -47,7 +45,6 @@ model = AutoModelForCausalLM.from_pretrained(
     model_name,
     quantization_config=quantization_config,
     device_map="auto",
-    dtype=torch.float16,
     trust_remote_code=True
 )
 
@@ -126,6 +123,7 @@ def tokenize_function(examples):
         return_tensors=None
     )
     # For causal LM, labels are the same as input_ids
+    # The data collator will handle padding and masking
     tokenized["labels"] = tokenized["input_ids"].copy()
     return tokenized
 
@@ -256,9 +254,12 @@ print(f"\nTraining completed in {training_time/60:.2f} minutes ({training_time:.
 
 # Save the final model
 print("Saving model...")
-# trainer.save_model()
-# tokenizer.save_pretrained(output_dir)
-trainer.model.push_to_hub("stellaray777/1000s-websites")
-tokenizer.push_to_hub("stellaray777/1000s-websites")
+try:
+    # Push to Hugging Face Hub
+    trainer.model.push_to_hub("stellaray777/1000s-websites")
+    tokenizer.push_to_hub("stellaray777/1000s-websites")
+    print("Model pushed to Hugging Face Hub successfully!")
+except Exception as e:
+    print(f"Error pushing model to Hub: {e}")
 
 print("Training completed!")
