@@ -23,6 +23,19 @@ warnings.filterwarnings("ignore", message=".*Xet Storage.*")
 # Configuration
 model_name = "deepseek-ai/deepseek-coder-6.7b-instruct"
 output_dir = "./results"
+EOT_TOKEN = "<|EOT|>"
+
+# ----------------------
+# Prompt template (added)
+# ----------------------
+def build_instruction_prompt(instruction: str):
+    return (
+        "You are an AI programming assistant, utilizing the DeepSeek Coder model, "
+        "developed by DeepSeek Company, and you only answer questions related to computer science.\n"
+        "### Instruction:\n"
+        f"{instruction.strip()}\n"
+        "### Response:\n"
+    )
 
 # Load tokenizer and model
 print("Loading tokenizer and model...")
@@ -81,67 +94,39 @@ else:
 print("Loading dataset...")
 dataset = load_dataset("stellaray777/1000s-websites", split="train")
 
-# Format dataset for chat
-def format_chat_template(example):
-    """Format messages using chat template"""
-    messages = example["messages"]
-    
-    # Use chat template if available, otherwise format manually
-    if hasattr(tokenizer, "apply_chat_template") and tokenizer.chat_template:
-        formatted = tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=False
-        )
-    else:
-        # Manual formatting if no chat template
-        formatted = ""
-        for msg in messages:
-            role = msg["role"]
-            content = msg["content"]
-            if role == "system":
-                formatted += f"System: {content}\n\n"
-            elif role == "user":
-                formatted += f"User: {content}\n\n"
-            elif role == "assistant":
-                formatted += f"Assistant: {content}\n\n"
-    
-    return {"text": formatted}
-
-# Apply formatting
-print("Formatting dataset...")
-dataset = dataset.map(format_chat_template, remove_columns=["messages"])
-
+# ----------------------
+# FIXED tokenization
+# ----------------------
 # Tokenize dataset
 def tokenize_function(example):
-    text = example["text"]
+    source = build_instruction_prompt(example["instruction"])
+    target = example["output"] + "\n" + EOT_TOKEN
+    full_text = source + target
 
     tokenized = tokenizer(
-        text,
+        full_text,
         truncation=True,
         max_length=2048,
-        padding=False,
-        return_offsets_mapping=True,
+        padding=False
     )
 
     labels = tokenized["input_ids"].copy()
-    offsets = tokenized["offset_mapping"]
 
-    assistant_pos = text.find("Assistant:")
-    if assistant_pos != -1:
-        for i, (start, end) in enumerate(offsets):
-            if end <= assistant_pos:
-                labels[i] = -100
+    source_ids = tokenizer(
+        source,
+        truncation=True,
+        max_length=2048,
+        padding=False
+    )["input_ids"]
 
+    labels[:len(source_ids)] = [-100] * len(source_ids)
     tokenized["labels"] = labels
-    tokenized.pop("offset_mapping")  # remove unused field
     return tokenized
 
 print("Tokenizing dataset...")
 tokenized_dataset = dataset.map(
     tokenize_function,
-    batched=True,
-    remove_columns=["text"],
+    remove_columns=dataset.column_names,
     desc="Tokenizing"
 )
 
