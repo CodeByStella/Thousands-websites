@@ -14,7 +14,7 @@ os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 warnings.filterwarnings("ignore", message=".*Xet Storage.*")
 
 # Configuration
-MODEL_NAME = "deepseek-ai/deepseek-coder-6.7b-base"
+MODEL_NAME = "deepseek-ai/deepseek-coder-6.7b-instruct"
 
 def load_model():
     """Load the base model with quantization"""
@@ -90,7 +90,7 @@ def generate_response(model, tokenizer, prompt, max_length=2048, temperature=0.7
 def chat_loop(model, tokenizer):
     """Interactive chat loop"""
     print("\n" + "="*80)
-    print("Base Model Chatbot - DeepSeek Coder 6.7B")
+    print("Instruct Model Chatbot - DeepSeek Coder 6.7B Instruct")
     print("="*80)
     print("Type 'quit' or 'exit' to end the conversation")
     print("Type 'clear' to clear the conversation history")
