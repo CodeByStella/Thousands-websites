@@ -21,12 +21,12 @@ os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 warnings.filterwarnings("ignore", message=".*Xet Storage.*")
 
 # Configuration
-model_name = "deepseek-ai/deepseek-coder-6.7b-base"
-output_dir = "./checkpoints"
+model_name = "deepseek-ai/deepseek-coder-6.7b-instruct"
+output_dir = "./results"
 
 # Load tokenizer and model
 print("Loading tokenizer and model...")
-tokenizer = AutoTokenizer.from_pretrained(model_name)
+tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 
 # Set pad token if it doesn't exist
 if tokenizer.pad_token is None:
@@ -113,18 +113,28 @@ print("Formatting dataset...")
 dataset = dataset.map(format_chat_template, remove_columns=["messages"])
 
 # Tokenize dataset
-def tokenize_function(examples):
-    """Tokenize the text"""
+def tokenize_function(example):
+    text = example["text"]
+
     tokenized = tokenizer(
-        examples["text"],
+        text,
         truncation=True,
         max_length=2048,
         padding=False,
-        return_tensors=None
+        return_offsets_mapping=True,
     )
-    # For causal LM, labels are the same as input_ids
-    # The data collator will handle padding and masking
-    tokenized["labels"] = tokenized["input_ids"].copy()
+
+    labels = tokenized["input_ids"].copy()
+    offsets = tokenized["offset_mapping"]
+
+    assistant_pos = text.find("Assistant:")
+    if assistant_pos != -1:
+        for i, (start, end) in enumerate(offsets):
+            if end <= assistant_pos:
+                labels[i] = -100
+
+    tokenized["labels"] = labels
+    tokenized.pop("offset_mapping")  # remove unused field
     return tokenized
 
 print("Tokenizing dataset...")
@@ -156,14 +166,14 @@ if dataset_size < min_examples_per_step:
 # Training arguments
 training_args = TrainingArguments(
     output_dir=output_dir,
-    num_train_epochs=3,
+    num_train_epochs=5,
     per_device_train_batch_size=per_device_batch_size,
     gradient_accumulation_steps=gradient_accumulation_steps,
-    learning_rate=2e-4,
+    learning_rate=1e-4,
     fp16=True,
     logging_steps=1,  # Log every step for small datasets
     logging_first_step=True,  # Log the first step
-    save_steps=10,  # Save more frequently for small datasets
+    save_steps=20,  # Save more frequently for small datasets
     save_total_limit=3,
     save_strategy="steps",
     warmup_steps=min(50, dataset_size),  # Adjust warmup for small datasets

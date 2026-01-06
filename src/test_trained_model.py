@@ -14,7 +14,7 @@ os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 warnings.filterwarnings("ignore", message=".*Xet Storage.*")
 
 # Configuration
-BASE_MODEL_NAME = "deepseek-ai/deepseek-coder-6.7b-base"
+BASE_MODEL_NAME = "deepseek-ai/deepseek-coder-6.7b-instruct"
 TRAINED_MODEL_NAME = "stellaray777/1000s-websites"
 LOCAL_MODEL_PATH = "./model"  # Path if model is cloned locally
 

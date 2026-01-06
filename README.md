@@ -1,6 +1,6 @@
 # Thousands-websites [![Open Notebook In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/CodeByStella/Thousands-websites/blob/main/notebooks/notebook.ipynb)
 
-Fine-tuning DeepSeek Coder 6.7B model on thousands of websites dataset using LoRA and 4-bit quantization.
+Fine-tuning DeepSeek Coder 6.7B Instruct model on thousands of websites dataset using LoRA and 4-bit quantization.
 
 ## Quick Start
 
@@ -119,7 +119,7 @@ Both scripts provide an interactive chatbot interface. Type your prompts and get
 
 ## Training Configuration
 
-- **Model**: `deepseek-ai/deepseek-coder-6.7b-base`
+- **Model**: `deepseek-ai/deepseek-coder-6.7b-instruct`
 - **Epochs**: 3
 - **Batch Size**: 1 (gradient accumulation: 4)
 - **Learning Rate**: 2e-4
