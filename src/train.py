@@ -22,7 +22,7 @@ warnings.filterwarnings("ignore", message=".*Xet Storage.*")
 
 # Configuration
 model_name = "deepseek-ai/deepseek-coder-6.7b-base"
-output_dir = "./results"
+output_dir = "./checkpoints"
 
 # Load tokenizer and model
 print("Loading tokenizer and model...")
@@ -212,10 +212,18 @@ class ProgressCallback(TrainerCallback):
             epoch = state.epoch
             loss = logs.get('loss', 'N/A')
             learning_rate = logs.get('learning_rate', 'N/A')
-            if isinstance(loss, (int, float)):
-                print(f"\n✅ [Step {step}/{self.total_steps}] Epoch {epoch:.2f} | Loss: {loss:.4f} | LR: {learning_rate:.2e}")
+            
+            # Format learning rate safely
+            if isinstance(learning_rate, (int, float)):
+                lr_str = f"{learning_rate:.2e}"
             else:
-                print(f"\n✅ [Step {step}/{self.total_steps}] Epoch {epoch:.2f} | LR: {learning_rate:.2e}")
+                lr_str = str(learning_rate)
+            
+            # Format loss and print
+            if isinstance(loss, (int, float)):
+                print(f"\n✅ [Step {step}/{self.total_steps}] Epoch {epoch:.2f} | Loss: {loss:.4f} | LR: {lr_str}")
+            else:
+                print(f"\n✅ [Step {step}/{self.total_steps}] Epoch {epoch:.2f} | LR: {lr_str}")
             self.last_update = time.time()
     
     def on_step_end(self, args, state, control, **kwargs):
