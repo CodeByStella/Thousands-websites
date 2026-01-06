@@ -1,4 +1,4 @@
-# Thousands-websites
+# Thousands-websites [![Open Notebook In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/CodeByStella/Thousands-websites/blob/main/notebooks/notebook.ipynb)
 
 Fine-tuning DeepSeek Coder 6.7B model on thousands of websites dataset using LoRA and 4-bit quantization.
 
