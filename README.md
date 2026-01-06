@@ -66,8 +66,20 @@ git clone https://huggingface.co/datasets/stellaray777/1000s-websites dataset
 
 **Update dataset:**
 ```bash
+# With AI reasoning (requires OPENAI_API_KEY in .env)
 python src/dataset_build.py
+
+# Without AI reasoning (fallback mode)
+python src/dataset_build.py --no-ai
 ```
+
+**Setup OpenAI API (optional but recommended):**
+1. Get API key from https://platform.openai.com/api-keys
+2. Create `.env` file in project root:
+   ```
+   OPENAI_API_KEY=your_key_here
+   ```
+3. The script will automatically use AI to generate design reasoning (80% automated)
 
 ### Managing Models
 
