@@ -16,3 +16,5 @@ model/
 project_templates/
 checkpoints/
 results/
+result/
+*.log
