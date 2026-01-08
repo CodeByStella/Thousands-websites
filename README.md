@@ -57,21 +57,102 @@ git commit -m "Description"
 git push origin feature/your-feature
 ```
 
-### Managing Datasets
+### Gathering Website Templates
 
-**Clone dataset:**
+**Basic usage:**
 ```bash
-git clone https://huggingface.co/datasets/stellaray777/1000s-websites dataset
+# Start gathering templates from the beginning
+python src/gather_templates.py
+
+# Start from a specific post number
+python src/gather_templates.py --start-from 100
+
+# Limit to 50 sites
+python src/gather_templates.py --max-sites 50
 ```
 
-**Update dataset:**
+**Parameters for `gather_templates.py`:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `--start-from` | int | 0 | Starting post number for API requests |
+| `--max-sites` | int | None | Maximum number of sites to process (no limit if not specified) |
+| `--batch-size` | int | 20 | Number of sites to fetch per API request |
+| `--interval` | float | 2.0 | Interval between requests in seconds (to avoid rate limiting) |
+| `--no-skip-existing` | flag | False | Re-download sites even if they already exist |
+| `--fresh` | flag | False | **WARNING**: Remove all existing templates in `project_templates/` and start from scratch |
+
+**Examples:**
 ```bash
-# With AI reasoning (requires OPENAI_API_KEY in .env)
+# Start fresh - remove all existing templates and download from scratch
+python src/gather_templates.py --fresh
+
+# Add to existing templates (skip already downloaded sites)
+python src/gather_templates.py --start-from 0 --max-sites 100
+
+# Re-download existing sites (force update)
+python src/gather_templates.py --no-skip-existing
+
+# Custom batch size and interval for slower/faster downloading
+python src/gather_templates.py --batch-size 10 --interval 3.0
+```
+
+**Output:**
+- Templates are saved in `project_templates/` directory
+- Each website gets its own folder with:
+  - `info.html` - Detail page from muuuuu.org
+  - `index.html` - Actual website HTML
+  - `metadata.json` - Site metadata and credit info
+  - `assets/` - CSS and JavaScript files
+
+### Building Dataset
+
+**Basic usage:**
+```bash
+# Build dataset with AI reasoning (requires OPENAI_API_KEY in .env)
 python src/dataset_build.py
 
-# Without AI reasoning (fallback mode)
+# Build dataset without AI reasoning (fallback mode)
 python src/dataset_build.py --no-ai
 ```
+
+**Parameters for `dataset_build.py`:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `--incremental` | flag | False | Update existing dataset incrementally (add new examples, skip duplicates) |
+| `--no-ai` | flag | False | Disable AI reasoning generation (use fallback reasoning) |
+| `--no-full-page` | flag | False | Skip full page examples (only generate component and grouped examples) |
+| `--no-export` | flag | False | Skip exporting examples to `result/` directory (only create JSONL) |
+| `--fresh` | flag | False | **WARNING**: Remove existing dataset (`dataset/train.jsonl`) and results (`result/`) directory, start from scratch |
+| `--verbose` / `-v` | flag | False | Enable verbose logging (debug mode) |
+
+**Examples:**
+```bash
+# Start fresh - remove existing dataset and rebuild from scratch
+python src/dataset_build.py --fresh
+
+# Add to existing dataset (incremental update)
+python src/dataset_build.py --incremental
+
+# Build without AI reasoning (faster, uses fallback)
+python src/dataset_build.py --no-ai
+
+# Build only component examples (no full pages)
+python src/dataset_build.py --no-full-page
+
+# Build dataset but don't export to result/ folders
+python src/dataset_build.py --no-export
+
+# Full example: Fresh start, no AI, no full pages, no export
+python src/dataset_build.py --fresh --no-ai --no-full-page --no-export
+```
+
+**Output:**
+- Dataset saved to `dataset/train.jsonl` (JSONL format for training)
+- Examples exported to `result/` directory (one folder per example):
+  - `example_0001/`, `example_0002/`, etc.
+  - Each folder contains: `instruction.txt`, `reasoning.txt`, `index.html`, `style.css`, `script.js`, `output.txt`
 
 **Setup OpenAI API (optional but recommended):**
 1. Get API key from https://platform.openai.com/api-keys
