@@ -7,6 +7,7 @@ import os
 import json
 import re
 import logging
+import time
 from pathlib import Path
 from bs4 import BeautifulSoup
 from typing import Dict, List, Optional, Tuple, Set
@@ -1500,6 +1501,10 @@ Format as bullet points starting with "- "."""
 
         reasoning = response.choices[0].message.content.strip()
         logger.debug(f"Generated reasoning: {reasoning[:100]}...")
+        
+        # Sleep to avoid rate limiting (1.5 seconds between API calls)
+        time.sleep(1.5)
+        
         return reasoning
 
     except ImportError:
@@ -2098,33 +2103,134 @@ def build_dataset(incremental: bool = False, use_ai: bool = True, include_full_p
         except Exception as e:
             logger.warning(f"Could not load existing dataset: {e}")
 
-    # Process all templates
+    # Process all templates with incremental saving
     examples = []
     skipped = 0
     errors = 0
     total_components = 0
     total_grouped = 0
     total_full_pages = 0
+    
+    # Open output file for incremental writing (append mode to preserve existing data)
+    file_mode = "w" if fresh_start else "a"
+    output_file_handle = None
+    
+    try:
+        # Ensure directory exists
+        OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        output_file_handle = open(OUTPUT_FILE, file_mode, encoding="utf-8")
+        
+        for i, template_dir in enumerate(template_dirs, 1):
+            logger.info(f"[{i}/{len(template_dirs)}] Processing {template_dir.name}...")
 
-    for i, template_dir in enumerate(template_dirs, 1):
-        logger.info(f"[{i}/{len(template_dirs)}] Processing {template_dir.name}...")
-
-        template_examples = process_website_template(
-            template_dir, use_ai_reasoning=use_ai, include_full_page=include_full_page
-        )
-        if template_examples:
-            examples.extend(template_examples)
-            # Count example types (rough estimate based on instruction content)
-            for ex in template_examples:
-                inst = ex.get("instruction", "")
-                if "full page" in inst.lower() or "complete" in inst.lower():
-                    total_full_pages += 1
-                elif "+" in inst or "group" in inst.lower():
-                    total_grouped += 1
+            try:
+                template_examples = process_website_template(
+                    template_dir, use_ai_reasoning=use_ai, include_full_page=include_full_page
+                )
+                if template_examples:
+                    # Filter out duplicates if in incremental mode
+                    new_examples = []
+                    for ex in template_examples:
+                        if incremental:
+                            # Check for duplicates using output hash
+                            output = ex.get("output", "")
+                            if output:
+                                output_hash = hashlib.md5(output.encode()).hexdigest()
+                                if output_hash not in existing_hashes:
+                                    existing_hashes.add(output_hash)
+                                    new_examples.append(ex)
+                                else:
+                                    logger.debug(f"  Skipping duplicate example")
+                            else:
+                                new_examples.append(ex)
+                        else:
+                            new_examples.append(ex)
+                    
+                    if new_examples:
+                        # Write examples immediately to preserve progress
+                        for ex in new_examples:
+                            output_file_handle.write(json.dumps(ex, ensure_ascii=False) + "\n")
+                            output_file_handle.flush()  # Ensure data is written immediately
+                        
+                        examples.extend(new_examples)
+                        # Count example types (rough estimate based on instruction content)
+                        for ex in new_examples:
+                            inst = ex.get("instruction", "")
+                            if "full page" in inst.lower() or "complete" in inst.lower():
+                                total_full_pages += 1
+                            elif "+" in inst or "group" in inst.lower():
+                                total_grouped += 1
+                            else:
+                                total_components += 1
+                        logger.info(f"  ✓ Saved {len(new_examples)} examples to dataset")
+                    else:
+                        logger.debug(f"  All examples were duplicates, skipping")
+                        skipped += 1
                 else:
-                    total_components += 1
-        else:
-            skipped += 1
+                    skipped += 1
+            except Exception as e:
+                # If using AI and error occurs, switch to non-AI mode and retry
+                if use_ai:
+                    logger.warning(f"⚠ Error occurred while processing with AI: {e}")
+                    logger.warning(f"   Switching to non-AI mode from this point forward...")
+                    use_ai = False
+                    
+                    # Retry processing this template without AI
+                    try:
+                        logger.info(f"   Retrying {template_dir.name} without AI...")
+                        template_examples = process_website_template(
+                            template_dir, use_ai_reasoning=False, include_full_page=include_full_page
+                        )
+                        if template_examples:
+                            # Filter out duplicates if in incremental mode
+                            new_examples = []
+                            for ex in template_examples:
+                                if incremental:
+                                    output = ex.get("output", "")
+                                    if output:
+                                        output_hash = hashlib.md5(output.encode()).hexdigest()
+                                        if output_hash not in existing_hashes:
+                                            existing_hashes.add(output_hash)
+                                            new_examples.append(ex)
+                                    else:
+                                        new_examples.append(ex)
+                                else:
+                                    new_examples.append(ex)
+                            
+                            if new_examples:
+                                # Write examples immediately
+                                for ex in new_examples:
+                                    output_file_handle.write(json.dumps(ex, ensure_ascii=False) + "\n")
+                                    output_file_handle.flush()
+                                
+                                examples.extend(new_examples)
+                                # Count example types
+                                for ex in new_examples:
+                                    inst = ex.get("instruction", "")
+                                    if "full page" in inst.lower() or "complete" in inst.lower():
+                                        total_full_pages += 1
+                                    elif "+" in inst or "group" in inst.lower():
+                                        total_grouped += 1
+                                    else:
+                                        total_components += 1
+                                logger.info(f"  ✓ Saved {len(new_examples)} examples to dataset (non-AI)")
+                            else:
+                                skipped += 1
+                        else:
+                            skipped += 1
+                    except Exception as retry_error:
+                        logger.error(f"Error processing {template_dir.name} (non-AI retry): {retry_error}", exc_info=True)
+                        errors += 1
+                        skipped += 1
+                else:
+                    # Already in non-AI mode, just log the error
+                    logger.error(f"Error processing {template_dir.name}: {e}", exc_info=True)
+                    errors += 1
+                    skipped += 1
+    finally:
+        # Close the file handle
+        if output_file_handle:
+            output_file_handle.close()
 
     logger.info(f"\n{'=' * 80}")
     logger.info(f"Processing complete!")
@@ -2141,23 +2247,18 @@ def build_dataset(incremental: bool = False, use_ai: bool = True, include_full_p
         logger.error("No valid examples generated!")
         return
 
-    # Write to JSONL file
-    logger.info(f"Writing to {OUTPUT_FILE}...")
+    # Dataset has already been written incrementally, just report final stats
+    logger.info(f"✓ Dataset saved incrementally to {OUTPUT_FILE}")
+    logger.info(f"  - {len(examples)} examples written (saved incrementally during processing)")
+    logger.info(f"  - Log file: {LOG_FILE}")
+
+    # Print statistics
     try:
-        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-            for example in examples:
-                f.write(json.dumps(example, ensure_ascii=False) + "\n")
-
-        logger.info(f"✓ Dataset created successfully!")
-        logger.info(f"  - {len(examples)} examples written to {OUTPUT_FILE}")
-        logger.info(f"  - Log file: {LOG_FILE}")
-
-        # Print statistics
-        total_size = OUTPUT_FILE.stat().st_size
-        logger.info(f"  - File size: {total_size / 1024:.2f} KB")
-
+        if OUTPUT_FILE.exists():
+            total_size = OUTPUT_FILE.stat().st_size
+            logger.info(f"  - File size: {total_size / 1024:.2f} KB")
     except Exception as e:
-        logger.error(f"Error writing dataset: {e}", exc_info=True)
+        logger.warning(f"Could not get file size: {e}")
     
     # Export to readable format in result/ directory
     if export_to_folders:

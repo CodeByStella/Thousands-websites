@@ -15,6 +15,8 @@ from typing import Dict, List, Optional, Tuple, Set
 from urllib.parse import urljoin, urlparse
 import hashlib
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 
 # Configuration - get paths relative to project root
 SCRIPT_DIR = Path(__file__).parent
@@ -1026,8 +1028,9 @@ def fetch_website_content(session: requests.Session, site_url: str, project_dir:
             results['css'] = True
             logger.debug("Saved inline CSS")
         
-        # Download CSS files and track them
+        # Download CSS files and track them (with parallel downloads)
         css_count = 0
+        css_downloads = []
         for link in soup.find_all('link', rel='stylesheet'):
             href = link.get('href', '')
             if not href:
@@ -1074,16 +1077,27 @@ def fetch_website_content(session: requests.Session, site_url: str, project_dir:
                 counter += 1
             
             css_path = assets_dir / css_filename
-            
-            if download_file(session, css_url, css_path, is_text=True):
-                downloaded_css[css_url] = css_filename
-                # Update HTML link to point to local relative file
-                link['href'] = f"assets/{css_filename}"
-                css_count += 1
-                results['css'] = True
-            else:
-                # Remove failed download link
-                link.decompose()
+            css_downloads.append((css_url, css_path, css_filename, link))
+        
+        # Download CSS files in parallel (up to 5 concurrent)
+        if css_downloads:
+            with ThreadPoolExecutor(max_workers=min(5, len(css_downloads))) as executor:
+                css_futures = {executor.submit(download_file, session, url, path, True): (url, filename, link_elem) 
+                              for url, path, filename, link_elem in css_downloads}
+                
+                for future in as_completed(css_futures):
+                    url, filename, link_elem = css_futures[future]
+                    try:
+                        if future.result():
+                            downloaded_css[url] = filename
+                            link_elem['href'] = f"assets/{filename}"
+                            css_count += 1
+                            results['css'] = True
+                        else:
+                            link_elem.decompose()
+                    except Exception as e:
+                        logger.warning(f"Error downloading CSS {url}: {e}")
+                        link_elem.decompose()
         
         # Extract and save inline JavaScript (extract from soup to ensure proper encoding)
         inline_js = extract_inline_js(str(soup))
@@ -1096,8 +1110,9 @@ def fetch_website_content(session: requests.Session, site_url: str, project_dir:
             results['js'] = True
             logger.debug("Saved inline JavaScript")
         
-        # Download JavaScript files and track them
+        # Download JavaScript files and track them (with parallel downloads)
         js_count = 0
+        js_downloads = []
         for script in soup.find_all('script', src=True):
             src = script.get('src', '')
             if not src:
@@ -1144,22 +1159,34 @@ def fetch_website_content(session: requests.Session, site_url: str, project_dir:
                 counter += 1
             
             js_path = assets_dir / js_filename
-            
-            if download_file(session, js_url, js_path, is_text=True):
-                downloaded_js[js_url] = js_filename
-                # Update HTML script src to point to local relative file
-                script['src'] = f"assets/{js_filename}"
-                js_count += 1
-                results['js'] = True
-            else:
-                # Remove failed download script
-                script.decompose()
+            js_downloads.append((js_url, js_path, js_filename, script))
         
-        # Download images and update paths
+        # Download JS files in parallel (up to 5 concurrent)
+        if js_downloads:
+            with ThreadPoolExecutor(max_workers=min(5, len(js_downloads))) as executor:
+                js_futures = {executor.submit(download_file, session, url, path, True): (url, filename, script_elem) 
+                             for url, path, filename, script_elem in js_downloads}
+                
+                for future in as_completed(js_futures):
+                    url, filename, script_elem = js_futures[future]
+                    try:
+                        if future.result():
+                            downloaded_js[url] = filename
+                            script_elem['src'] = f"assets/{filename}"
+                            js_count += 1
+                            results['js'] = True
+                        else:
+                            script_elem.decompose()
+                    except Exception as e:
+                        logger.warning(f"Error downloading JS {url}: {e}")
+                        script_elem.decompose()
+        
+        # Download images and update paths (with parallel downloads)
         images_dir = assets_dir / "images"
         images_dir.mkdir(exist_ok=True)
         downloaded_images = {}
         img_count = 0
+        img_downloads = []
         
         for img in soup.find_all('img', src=True):
             src = img.get('src', '')
@@ -1228,15 +1255,28 @@ def fetch_website_content(session: requests.Session, site_url: str, project_dir:
                 counter += 1
             
             img_path = images_dir / img_filename
-            
-            if download_image(session, img_url, img_path):
-                downloaded_images[img_url] = img_filename
-                # Update HTML img src to point to local relative file
-                img['src'] = f"assets/images/{img_filename}"
-                img_count += 1
+            img_downloads.append((img_url, img_path, img_filename, img))
+        
+        # Download images in parallel (up to 10 concurrent for images)
+        if img_downloads:
+            with ThreadPoolExecutor(max_workers=min(10, len(img_downloads))) as executor:
+                img_futures = {executor.submit(download_image, session, url, path): (url, filename, img_elem) 
+                              for url, path, filename, img_elem in img_downloads}
                 
-                # Also handle srcset if present (responsive images)
-                if img.get('srcset'):
+                for future in as_completed(img_futures):
+                    url, filename, img_elem = img_futures[future]
+                    try:
+                        if future.result():
+                            downloaded_images[url] = filename
+                            img_elem['src'] = f"assets/images/{filename}"
+                            img_count += 1
+                    except Exception as e:
+                        logger.debug(f"Error downloading image {url}: {e}")
+        
+        # Process srcset for successfully downloaded images
+        for img in soup.find_all('img', src=True):
+            # Also handle srcset if present (responsive images)
+            if img.get('srcset'):
                     srcset = img.get('srcset', '')
                     # Parse srcset (format: "url1 1x, url2 2x" or "url1 100w, url2 200w")
                     srcset_parts = []
@@ -1482,8 +1522,11 @@ def process_site(session: requests.Session, site_info: Dict, force_redownload: b
     else:
         logger.warning(f"Failed to fetch/process detail page: {detail_url}")
     
-    # Wait before fetching website
-    time.sleep(REQUEST_INTERVAL)
+    # Wait before fetching website (only in sequential mode, parallel workers handle their own timing)
+    # Note: When using parallel workers, each worker has its own session and timing
+    # The sleep here is minimal since parallel workers naturally space out requests
+    if not hasattr(process_site, '_parallel_mode'):
+        time.sleep(REQUEST_INTERVAL * 0.5)  # Reduced wait time
     
     # Fetch website content
     results = fetch_website_content(session, site_url, project_dir)
@@ -1528,8 +1571,16 @@ def get_processed_sites() -> Set[str]:
     return processed
 
 
-def gather_templates(start_from: int = 0, max_sites: Optional[int] = None, skip_existing: bool = True, fresh_start: bool = False):
-    """Main function to gather templates from muuuuu.org."""
+def gather_templates(start_from: int = 0, max_sites: Optional[int] = None, skip_existing: bool = True, fresh_start: bool = False, workers: int = 1):
+    """Main function to gather templates from muuuuu.org.
+    
+    Args:
+        start_from: Starting post number
+        max_sites: Maximum number of sites to process
+        skip_existing: Skip already processed sites
+        fresh_start: Remove all existing templates before starting
+        workers: Number of parallel workers for processing sites (default: 1, sequential)
+    """
     # Handle fresh start - remove all existing templates
     if fresh_start:
         if PROJECT_TEMPLATES_DIR.exists():
@@ -1593,7 +1644,8 @@ def gather_templates(start_from: int = 0, max_sites: Optional[int] = None, skip_
             logger.warning("No sites found in response, but response was not empty. Stopping.")
             break
         
-        # Process each site
+        # Process each site (with optional parallelization)
+        sites_to_process = []
         for site_info in sites:
             if max_sites and total_processed >= max_sites:
                 break
@@ -1604,14 +1656,52 @@ def gather_templates(start_from: int = 0, max_sites: Optional[int] = None, skip_
                 logger.debug(f"Skipping already processed site: {site_info['site_url']}")
                 continue
             
-            success = process_site(session, site_info, force_redownload=not skip_existing)
-            if success:
-                total_processed += 1
-                if skip_existing:
-                    processed_sites.add(site_info['site_url'])
+            sites_to_process.append(site_info)
+        
+        # Process sites in parallel if workers > 1
+        if workers > 1 and sites_to_process:
+            logger.info(f"Processing {len(sites_to_process)} sites with {workers} parallel workers...")
+            # Use a lock for thread-safe updates to shared counters
+            counter_lock = Lock()
             
-            # Wait between sites to avoid rate limiting
-            time.sleep(REQUEST_INTERVAL)
+            def process_site_wrapper(site_info):
+                """Wrapper to process a site with its own session."""
+                site_session = get_session()
+                try:
+                    success = process_site(site_session, site_info, force_redownload=not skip_existing)
+                    return success, site_info
+                except Exception as e:
+                    logger.error(f"Error processing {site_info.get('site_url', 'unknown')}: {e}")
+                    return False, site_info
+            
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                # Submit all tasks
+                future_to_site = {executor.submit(process_site_wrapper, site_info): site_info 
+                                 for site_info in sites_to_process}
+                
+                # Process completed tasks
+                for future in as_completed(future_to_site):
+                    try:
+                        success, site_info = future.result()
+                        with counter_lock:
+                            if success:
+                                total_processed += 1
+                                if skip_existing:
+                                    processed_sites.add(site_info['site_url'])
+                    except Exception as e:
+                        logger.error(f"Error getting result for site: {e}")
+        else:
+            # Sequential processing (original behavior)
+            for site_info in sites_to_process:
+                success = process_site(session, site_info, force_redownload=not skip_existing)
+                if success:
+                    total_processed += 1
+                    if skip_existing:
+                        processed_sites.add(site_info['site_url'])
+                
+                # Wait between sites only in sequential mode
+                if workers == 1:
+                    time.sleep(REQUEST_INTERVAL)
         
         # Move to next batch
         post_num_now += BATCH_SIZE
@@ -1660,6 +1750,12 @@ if __name__ == "__main__":
         action='store_true',
         help='Remove all existing templates and start from scratch (WARNING: This deletes all data in project_templates/)'
     )
+    parser.add_argument(
+        '--workers',
+        type=int,
+        default=1,
+        help='Number of parallel workers for processing sites (default: 1, sequential). Higher values = faster but more server load. Recommended: 2-4'
+    )
     
     args = parser.parse_args()
     
@@ -1667,9 +1763,17 @@ if __name__ == "__main__":
     BATCH_SIZE = args.batch_size
     REQUEST_INTERVAL = args.interval
     
+    # Validate workers
+    if args.workers < 1:
+        logger.warning(f"Invalid workers value {args.workers}, using 1 (sequential)")
+        args.workers = 1
+    elif args.workers > 10:
+        logger.warning(f"High workers value {args.workers} may cause rate limiting. Consider using 2-4.")
+    
     gather_templates(
         start_from=args.start_from,
         max_sites=args.max_sites,
         skip_existing=not args.no_skip_existing,
-        fresh_start=args.fresh
+        fresh_start=args.fresh,
+        workers=args.workers
     )
