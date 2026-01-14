@@ -15,8 +15,9 @@ from collections import Counter
 import hashlib
 from dotenv import load_dotenv
 from functools import lru_cache
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeoutError
 import multiprocessing
+import threading
 
 # Load environment variables
 load_dotenv()
@@ -1541,7 +1542,8 @@ def generate_design_reasoning_with_openai(
     try:
         from openai import OpenAI
 
-        client = OpenAI(api_key=api_key)
+        # Initialize client with timeout to prevent hanging
+        client = OpenAI(api_key=api_key, timeout=30.0)
 
         # Build context for reasoning
         context_parts = []
@@ -1598,18 +1600,24 @@ Be specific, professional, and focus on design intent and user experience. Inclu
 Keep each point to 2-3 sentences with concrete details.
 Format as bullet points starting with "- "."""
 
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",  # Using mini for cost efficiency
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are an expert front-end designer who explains design decisions clearly and concisely.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.7,
-            max_tokens=300,
-        )
+        # Add timeout to prevent hanging on API calls
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",  # Using mini for cost efficiency
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are an expert front-end designer who explains design decisions clearly and concisely.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.7,
+                max_tokens=300,
+            )
+        except Exception as api_error:
+            # Log and return None instead of crashing
+            logger.warning(f"OpenAI API call failed or timed out: {api_error}")
+            return None
 
         reasoning = response.choices[0].message.content.strip()
         logger.debug(f"Generated reasoning: {reasoning[:100]}...")
@@ -2202,6 +2210,7 @@ def build_dataset(
     fresh_start: bool = False,
     parallel: bool = True,
     max_workers: Optional[int] = None,
+    start_from: int = 1,
 ):
     """Main function to build the dataset with enhanced features"""
     logger.info("=" * 80)
@@ -2248,13 +2257,29 @@ def build_dataset(
         return
 
     # Get all template directories
-    template_dirs = sorted([d for d in PROJECT_TEMPLATES_DIR.iterdir() if d.is_dir()])
+    all_template_dirs = sorted([d for d in PROJECT_TEMPLATES_DIR.iterdir() if d.is_dir()])
 
-    if not template_dirs:
+    if not all_template_dirs:
         logger.warning(f"No template directories found in {PROJECT_TEMPLATES_DIR}")
         return
 
-    logger.info(f"Found {len(template_dirs)} website templates")
+    total_templates_original = len(all_template_dirs)
+    logger.info(f"Found {total_templates_original} total website templates")
+
+    # Handle start_from parameter (1-indexed)
+    if start_from > 1:
+        if start_from > total_templates_original:
+            logger.warning(f"start_from ({start_from}) exceeds total templates ({total_templates_original}). Starting from beginning.")
+            start_from = 1
+            template_dirs = all_template_dirs
+        else:
+            skipped_count = start_from - 1
+            template_dirs = all_template_dirs[start_from - 1:]  # Convert to 0-indexed
+            logger.info(f"Resuming from template #{start_from} (skipping first {skipped_count} templates)")
+            logger.info(f"Processing {len(template_dirs)} remaining templates (out of {total_templates_original} total)")
+    else:
+        template_dirs = all_template_dirs
+        logger.info(f"Processing all {len(template_dirs)} templates")
 
     # Load existing examples for incremental updates
     existing_hashes = set()
@@ -2288,14 +2313,19 @@ def build_dataset(
     # Performance: Batch write buffer (write every N examples instead of each one)
     BATCH_WRITE_SIZE = 10  # Write every 10 examples
     write_buffer = []
+    
+    # Thread safety: Add locks for shared state
+    hash_lock = threading.Lock()
+    file_lock = threading.Lock()
 
     try:
         # Ensure directory exists
         OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
         output_file_handle = open(OUTPUT_FILE, file_mode, encoding="utf-8")
 
-        # Performance: Use parallel processing if enabled
-        if parallel and len(template_dirs) > 1:
+        # Performance: Disable parallel processing when using AI (API calls are sequential bottleneck)
+        # Parallel processing is only beneficial for non-AI processing
+        if parallel and len(template_dirs) > 1 and not use_ai:
             # Determine optimal worker count
             if max_workers is None:
                 max_workers = min(
@@ -2320,17 +2350,19 @@ def build_dataset(
 
                 # Process results as they complete
                 completed = 0
-                for future in as_completed(future_to_template):
+                for future in as_completed(future_to_template, timeout=300):  # 5 minute timeout per template
                     template_dir = future_to_template[future]
                     completed += 1
+                    current_number = start_from + completed - 1  # Show actual template number
                     logger.info(
-                        f"[{completed}/{len(template_dirs)}] Processing {template_dir.name}..."
+                        f"[{current_number}/{start_from + len(template_dirs) - 1}] Processing {template_dir.name}..."
                     )
 
                     try:
-                        template_examples = future.result()
+                        # Add timeout to prevent hanging
+                        template_examples = future.result(timeout=300)  # 5 minute timeout
                         if template_examples:
-                            # Filter out duplicates if in incremental mode
+                            # Filter out duplicates if in incremental mode (thread-safe)
                             new_examples = []
                             for ex in template_examples:
                                 if incremental:
@@ -2339,9 +2371,11 @@ def build_dataset(
                                         output_hash = hashlib.md5(
                                             output.encode()
                                         ).hexdigest()
-                                        if output_hash not in existing_hashes:
-                                            existing_hashes.add(output_hash)
-                                            new_examples.append(ex)
+                                        # Thread-safe hash check and add
+                                        with hash_lock:
+                                            if output_hash not in existing_hashes:
+                                                existing_hashes.add(output_hash)
+                                                new_examples.append(ex)
                                 else:
                                     new_examples.append(ex)
 
@@ -2349,13 +2383,14 @@ def build_dataset(
                                 # Add to write buffer
                                 write_buffer.extend(new_examples)
 
-                                # Batch write when buffer is full
+                                # Batch write when buffer is full (thread-safe)
                                 if len(write_buffer) >= BATCH_WRITE_SIZE:
-                                    for ex in write_buffer:
-                                        output_file_handle.write(
-                                            json.dumps(ex, ensure_ascii=False) + "\n"
-                                        )
-                                    output_file_handle.flush()
+                                    with file_lock:
+                                        for ex in write_buffer:
+                                            output_file_handle.write(
+                                                json.dumps(ex, ensure_ascii=False) + "\n"
+                                            )
+                                        output_file_handle.flush()
                                     write_buffer.clear()
 
                                 examples.extend(new_examples)
@@ -2378,6 +2413,10 @@ def build_dataset(
                                 skipped += 1
                         else:
                             skipped += 1
+                    except FutureTimeoutError:
+                        logger.error(f"Timeout processing {template_dir.name} (exceeded 5 minutes)")
+                        errors += 1
+                        skipped += 1
                     except Exception as e:
                         logger.error(f"Error processing {template_dir.name}: {e}")
                         errors += 1
@@ -2389,19 +2428,26 @@ def build_dataset(
                             )
                             use_ai = False
 
-                # Write remaining buffer
+                # Write remaining buffer (thread-safe)
                 if write_buffer:
-                    for ex in write_buffer:
-                        output_file_handle.write(
-                            json.dumps(ex, ensure_ascii=False) + "\n"
-                        )
-                    output_file_handle.flush()
+                    with file_lock:
+                        for ex in write_buffer:
+                            output_file_handle.write(
+                                json.dumps(ex, ensure_ascii=False) + "\n"
+                            )
+                        output_file_handle.flush()
                     write_buffer.clear()
         else:
+            # Sequential processing (either parallel disabled, or using AI which requires sequential)
+            if parallel and use_ai:
+                logger.info("Parallel processing disabled when using AI (API calls are sequential bottleneck)")
+            
             # Sequential processing (original code, optimized)
             for i, template_dir in enumerate(template_dirs, 1):
+                current_number = start_from + i - 1  # Show actual template number
+                total_templates = start_from + len(template_dirs) - 1
                 logger.info(
-                    f"[{i}/{len(template_dirs)}] Processing {template_dir.name}..."
+                    f"[{current_number}/{total_templates}] Processing {template_dir.name}..."
                 )
 
                 try:
@@ -2481,6 +2527,8 @@ def build_dataset(
 
     logger.info(f"\n{'=' * 80}")
     logger.info(f"Processing complete!")
+    if start_from > 1:
+        logger.info(f"  - Started from template #{start_from}")
     logger.info(f"  - Total examples: {len(examples)}")
     logger.info(f"    • Component examples: {total_components}")
     logger.info(f"    • Grouped examples: {total_grouped}")
@@ -2828,6 +2876,13 @@ if __name__ == "__main__":
         default=None,
         help="Number of parallel workers (default: auto-detect, max 8)",
     )
+    parser.add_argument(
+        "--start-from",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Start processing from template number N (1-indexed). Useful for resuming after errors. Example: --start-from 100",
+    )
 
     args = parser.parse_args()
 
@@ -2850,4 +2905,5 @@ if __name__ == "__main__":
         fresh_start=args.fresh,
         parallel=not args.no_parallel,
         max_workers=args.workers,
+        start_from=args.start_from,
     )
