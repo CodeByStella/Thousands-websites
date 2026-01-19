@@ -8,6 +8,8 @@ import json
 import re
 import logging
 import time
+import gc
+import sys
 from pathlib import Path
 from bs4 import BeautifulSoup
 from typing import Dict, List, Optional, Tuple, Set
@@ -15,7 +17,12 @@ from collections import Counter
 import hashlib
 from dotenv import load_dotenv
 from functools import lru_cache
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeoutError
+from concurrent.futures import (
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,
+    as_completed,
+    TimeoutError as FutureTimeoutError,
+)
 import multiprocessing
 import threading
 
@@ -70,6 +77,11 @@ MAX_COMPONENT_CSS_LENGTH = (
 MAX_COMPONENT_JS_LENGTH = (
     100000  # Max chars for component JS (increased to prevent truncation)
 )
+
+# Resource limits to prevent memory/CPU leaks
+MAX_CSS_PARSE_ITERATIONS = 100000  # Max iterations for CSS parsing loops
+MAX_FILE_SIZE_MB = 50  # Max file size in MB before skipping
+CSS_PARSE_TIMEOUT_SECONDS = 30  # Timeout for CSS parsing operations
 
 # Performance: Compile regex patterns once (reused many times)
 OBFUSCATION_PATTERNS = [
@@ -153,7 +165,11 @@ def is_obfuscated_or_minified(code: str, code_type: str = "js") -> bool:
 
 def replace_image_urls(html_content: str, assets_dir: Path) -> str:
     """Replace all image URLs with picsum.photos placeholders"""
-    soup = BeautifulSoup(html_content, PARSER)
+    try:
+        soup = BeautifulSoup(html_content, PARSER)
+    except Exception as e:
+        logger.warning(f"Error parsing HTML in replace_image_urls: {e}")
+        return html_content
 
     # Default dimensions for different image contexts
     default_dimensions = {
@@ -230,11 +246,16 @@ def replace_image_urls(html_content: str, assets_dir: Path) -> str:
             )
             style_tag.string = css_content
 
-    return str(soup)
+    result = str(soup)
+    # Explicit cleanup of BeautifulSoup object
+    soup.decompose()
+    del soup
+    return result
 
 
 def format_html(html_content: str) -> str:
     """Format and clean HTML content"""
+    soup = None
     try:
         soup = BeautifulSoup(html_content, PARSER)
         # Use prettify to format HTML with proper indentation
@@ -254,10 +275,16 @@ def format_html(html_content: str) -> str:
                 blank_count = 0
                 cleaned_lines.append(line)
 
-        return "\n".join(cleaned_lines)
+        result = "\n".join(cleaned_lines)
+        return result
     except Exception as e:
         logger.debug(f"Error formatting HTML: {e}, returning original")
         return html_content
+    finally:
+        # Explicit cleanup
+        if soup is not None:
+            soup.decompose()
+            del soup
 
 
 def format_css(css_content: str) -> str:
@@ -335,7 +362,12 @@ def format_javascript(js_content: str) -> str:
 
 def replace_urls_with_placeholders(html_content: str) -> str:
     """Replace all real URLs in links with placeholder links"""
-    soup = BeautifulSoup(html_content, PARSER)
+    soup = None
+    try:
+        soup = BeautifulSoup(html_content, PARSER)
+    except Exception as e:
+        logger.warning(f"Error parsing HTML in replace_urls_with_placeholders: {e}")
+        return html_content
 
     # Common placeholder patterns based on link text or context
     def generate_placeholder_url(link_element):
@@ -417,7 +449,11 @@ def replace_urls_with_placeholders(html_content: str) -> str:
         if action and (action.startswith("http://") or action.startswith("https://")):
             form["action"] = "#"
 
-    return str(soup)
+    result = str(soup)
+    # Explicit cleanup
+    soup.decompose()
+    del soup
+    return result
 
 
 def extract_url_from_folder_name(folder_name: str) -> str:
@@ -440,7 +476,19 @@ def parse_info_html(info_path: Path) -> Dict[str, any]:
         "keywords": [],
     }
 
+    soup = None
     try:
+        # Check file size first
+        try:
+            file_size_mb = info_path.stat().st_size / (1024 * 1024)
+            if file_size_mb > MAX_FILE_SIZE_MB:
+                logger.warning(
+                    f"Skipping {info_path.name}: File too large ({file_size_mb:.2f} MB)"
+                )
+                return metadata
+        except Exception:
+            pass
+
         with open(info_path, "r", encoding="utf-8") as f:
             content = f.read()
 
@@ -522,6 +570,15 @@ def parse_info_html(info_path: Path) -> Dict[str, any]:
 
     except Exception as e:
         logger.warning(f"Error parsing {info_path}: {e}")
+    finally:
+        # Explicit cleanup
+        if soup is not None:
+            soup.decompose()
+            del soup
+        try:
+            del content
+        except:
+            pass
 
     return metadata
 
@@ -531,6 +588,7 @@ def find_css_files(
 ) -> List[Tuple[str, str]]:
     """Find and extract CSS files referenced in HTML, filtering out obfuscated/minified code"""
     css_files = []
+    soup = None
     try:
         # Performance: Use provided HTML content if available to avoid re-reading
         if html_content is None:
@@ -605,6 +663,11 @@ def find_css_files(
 
     except Exception as e:
         logger.warning(f"Error finding CSS files: {e}")
+    finally:
+        # Explicit cleanup
+        if soup is not None:
+            soup.decompose()
+            del soup
 
     return css_files
 
@@ -614,6 +677,7 @@ def find_js_files(
 ) -> List[Tuple[str, str]]:
     """Find and extract JavaScript files referenced in HTML, filtering out obfuscated/minified code"""
     js_files = []
+    soup = None
     try:
         # Performance: Use provided HTML content if available to avoid re-reading
         if html_content is None:
@@ -687,6 +751,11 @@ def find_js_files(
 
     except Exception as e:
         logger.warning(f"Error finding JS files: {e}")
+    finally:
+        # Explicit cleanup
+        if soup is not None:
+            soup.decompose()
+            del soup
 
     return js_files
 
@@ -717,6 +786,7 @@ def extract_html_content(html_path: Path, assets_dir: Path) -> str:
 
 def extract_text_from_html(html_path: Path, max_length: int = 5000) -> str:
     """Extract meaningful text content from HTML for analysis"""
+    soup = None
     try:
         with open(html_path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -739,10 +809,20 @@ def extract_text_from_html(html_path: Path, max_length: int = 5000) -> str:
         if len(text) > max_length:
             text = text[:max_length] + "..."
 
-        return text
+        result = text
+        return result
     except Exception as e:
         logger.warning(f"Error extracting text from {html_path}: {e}")
         return ""
+    finally:
+        # Explicit cleanup
+        if soup is not None:
+            soup.decompose()
+            del soup
+        try:
+            del content
+        except:
+            pass
 
 
 def extract_html_components(html_content: str) -> Dict[str, List[str]]:
@@ -759,8 +839,12 @@ def extract_html_components(html_content: str) -> Dict[str, List[str]]:
         "typography": [],
     }
 
+    soup = None
     try:
         soup = BeautifulSoup(html_content, PARSER)
+    except Exception as e:
+        logger.warning(f"Error parsing HTML in extract_html_components: {e}")
+        return components
 
         # Extract headers (header tag or elements with header-related classes)
         for header in soup.find_all(["header"]):
@@ -846,6 +930,11 @@ def extract_html_components(html_content: str) -> Dict[str, List[str]]:
 
     except Exception as e:
         logger.warning(f"Error extracting components: {e}")
+    finally:
+        # Explicit cleanup
+        if soup is not None:
+            soup.decompose()
+            del soup
 
     # Remove duplicates and filter by size
     for key in components:
@@ -875,7 +964,17 @@ def extract_complete_css_rule_by_selector(
     # Find all CSS rules in the content
     rules = []
     i = 0
+    iterations = 0
+    start_time = time.time()
     while i < len(css_content):
+        # Prevent infinite loops
+        iterations += 1
+        if iterations > MAX_CSS_PARSE_ITERATIONS:
+            logger.warning(f"CSS rule extraction exceeded max iterations, breaking")
+            break
+        if time.time() - start_time > CSS_PARSE_TIMEOUT_SECONDS:
+            logger.warning(f"CSS rule extraction exceeded timeout, breaking")
+            break
         # Find selector start (look for patterns like .class, #id, tag, etc.)
         selector_start = i
         brace_start = css_content.find("{", i)
@@ -890,7 +989,12 @@ def extract_complete_css_rule_by_selector(
             # Find matching closing brace
             brace_depth = 1
             brace_end = brace_start + 1
+            brace_iterations = 0
             while brace_end < len(css_content) and brace_depth > 0:
+                brace_iterations += 1
+                if brace_iterations > 100000:  # Safety limit
+                    logger.warning(f"Brace matching exceeded limit, breaking")
+                    break
                 if css_content[brace_end] == "{":
                     brace_depth += 1
                 elif css_content[brace_end] == "}":
@@ -908,7 +1012,12 @@ def extract_complete_css_rule_by_selector(
             # Skip this rule
             brace_depth = 1
             brace_end = brace_start + 1
+            brace_iterations = 0
             while brace_end < len(css_content) and brace_depth > 0:
+                brace_iterations += 1
+                if brace_iterations > 100000:  # Safety limit
+                    logger.warning(f"Brace matching exceeded limit, breaking")
+                    break
                 if css_content[brace_end] == "{":
                     brace_depth += 1
                 elif css_content[brace_end] == "}":
@@ -924,7 +1033,12 @@ def extract_css_for_component(
 ) -> str:
     """Extract relevant CSS for a specific component, preserving complete CSS rules"""
     relevant_css_chunks = []
-    soup = BeautifulSoup(component_html, PARSER)
+    soup = None
+    try:
+        soup = BeautifulSoup(component_html, PARSER)
+    except Exception as e:
+        logger.warning(f"Error parsing HTML in extract_css_for_component: {e}")
+        return ""
 
     # Collect all class names and IDs from the component
     classes = set()
@@ -950,7 +1064,21 @@ def extract_css_for_component(
         css_normalized = COMMENT_PATTERN.sub("", css_content)
 
         i = 0
+        iterations = 0
+        start_time = time.time()
         while i < len(css_normalized):
+            # Prevent infinite loops and excessive CPU usage
+            iterations += 1
+            if iterations > MAX_CSS_PARSE_ITERATIONS:
+                logger.warning(
+                    f"CSS parsing exceeded max iterations for {css_file_name}, skipping remaining"
+                )
+                break
+            if time.time() - start_time > CSS_PARSE_TIMEOUT_SECONDS:
+                logger.warning(
+                    f"CSS parsing exceeded timeout for {css_file_name}, skipping remaining"
+                )
+                break
             # Find selector start - look backwards from { to find selector start
             brace_start = css_normalized.find("{", i)
             if brace_start == -1:
@@ -1010,7 +1138,12 @@ def extract_css_for_component(
             if is_match or selector.strip() == ":root":
                 brace_depth = 1
                 brace_end = brace_start + 1
+                brace_iterations = 0
                 while brace_end < len(css_content) and brace_depth > 0:
+                    brace_iterations += 1
+                    if brace_iterations > 100000:  # Safety limit for brace matching
+                        logger.warning(f"Brace matching exceeded limit, breaking")
+                        break
                     if css_content[brace_end] == "{":
                         brace_depth += 1
                     elif css_content[brace_end] == "}":
@@ -1033,7 +1166,12 @@ def extract_css_for_component(
                 # Skip this rule - find its end
                 brace_depth = 1
                 brace_end = brace_start + 1
+                brace_iterations = 0
                 while brace_end < len(css_content) and brace_depth > 0:
+                    brace_iterations += 1
+                    if brace_iterations > 100000:  # Safety limit
+                        logger.warning(f"Brace matching exceeded limit, breaking")
+                        break
                     if css_content[brace_end] == "{":
                         brace_depth += 1
                     elif css_content[brace_end] == "}":
@@ -1051,7 +1189,14 @@ def extract_css_for_component(
 
                 # Find :root rules that define these variables
                 i = 0
+                root_iterations = 0
                 while i < len(css_content):
+                    root_iterations += 1
+                    if root_iterations > MAX_CSS_PARSE_ITERATIONS:
+                        logger.warning(
+                            f":root parsing exceeded max iterations, breaking"
+                        )
+                        break
                     # Check if this position starts :root (at start of line or after whitespace)
                     if i == 0 or css_content[i - 1] in ["\n", " ", "\t"]:
                         if css_content[i:].startswith(":root"):
@@ -1059,7 +1204,14 @@ def extract_css_for_component(
                         if brace_start > 0:
                             brace_depth = 1
                             brace_end = brace_start + 1
+                            brace_iterations = 0
                             while brace_end < len(css_content) and brace_depth > 0:
+                                brace_iterations += 1
+                                if brace_iterations > 100000:  # Safety limit
+                                    logger.warning(
+                                        f"Brace matching exceeded limit, breaking"
+                                    )
+                                    break
                                 if css_content[brace_end] == "{":
                                     brace_depth += 1
                                 elif css_content[brace_end] == "}":
@@ -1094,13 +1246,22 @@ def extract_css_for_component(
 
     result = "\n\n".join(relevant_css_chunks)
     # Return all CSS - no truncation
+    # Explicit cleanup
+    if soup is not None:
+        soup.decompose()
+        del soup
     return result
 
 
 def extract_js_for_component(component_html: str, all_js: List[Tuple[str, str]]) -> str:
     """Extract relevant JavaScript for a specific component"""
     relevant_js = []
-    soup = BeautifulSoup(component_html, PARSER)
+    soup = None
+    try:
+        soup = BeautifulSoup(component_html, PARSER)
+    except Exception as e:
+        logger.warning(f"Error parsing HTML in extract_js_for_component: {e}")
+        return ""
 
     # Collect IDs, classes, and data attributes that might be used in JS
     identifiers = set()
@@ -1166,7 +1327,12 @@ def extract_js_for_component(component_html: str, all_js: List[Tuple[str, str]])
         if is_relevant:
             relevant_js.append(f"// {js_file_name}\n{js_content}")
 
-    return "\n\n".join(relevant_js)
+    result = "\n\n".join(relevant_js)
+    # Explicit cleanup
+    if soup is not None:
+        soup.decompose()
+        del soup
+    return result
 
 
 def analyze_color_scheme(
@@ -1568,8 +1734,6 @@ def generate_design_reasoning_with_openai(
             context_parts.append(f"Tech stack: {characteristics['stack']}")
         if css_files:
             context_parts.append(f"CSS files: {len(css_files)} file(s)")
-        if js_files:
-            context_parts.append(f"JavaScript files: {len(js_files)} file(s)")
 
         context = "\n".join(context_parts)
 
@@ -1644,9 +1808,8 @@ def create_component_example(
     characteristics: Dict,
 ) -> Optional[Dict]:
     """Create a training example for a single UI component"""
-    # Extract relevant CSS and JS for this component
+    # Extract relevant CSS for this component (only CSS that matches the component)
     component_css = extract_css_for_component(component_html, css_files)
-    component_js = extract_js_for_component(component_html, js_files)
 
     # Extract design keywords
     all_css = " ".join([css[1] for css in css_files])
@@ -1676,12 +1839,12 @@ def create_component_example(
 
     # Component-specific task
     component_tasks = {
-        "headers": "Create a website header/navigation component with semantic HTML, modern CSS styling, and responsive behavior. Include logo, navigation menu, and any interactive elements.",
+        "headers": "Create a website header/navigation component with semantic HTML and modern CSS styling. Include logo, navigation menu, and responsive behavior.",
         "footers": "Create a website footer component with semantic HTML and clean CSS styling. Include links, copyright information, and social media icons if applicable.",
         "sections": "Create a content section component with semantic HTML structure and modern CSS layout. Focus on proper spacing, typography, and visual hierarchy.",
-        "buttons": "Create a button component with semantic HTML, attractive CSS styling, and hover/active states. Ensure accessibility and responsive behavior.",
-        "navigation": "Create a navigation menu component with semantic HTML, CSS styling, and responsive mobile menu behavior if applicable.",
-        "hero": "Create a hero/banner section component with semantic HTML, eye-catching CSS styling, and responsive layout. Include heading, subheading, and call-to-action if applicable.",
+        "buttons": "Create a button component with semantic HTML and attractive CSS styling. Include hover/active states and ensure accessibility and responsive behavior.",
+        "navigation": "Create a navigation menu component with semantic HTML and CSS styling. Include responsive mobile menu behavior if applicable.",
+        "hero": "Create a hero/banner section component with semantic HTML and eye-catching CSS styling. Include responsive layout, heading, subheading, and call-to-action if applicable.",
         "cards": "Create a card component with semantic HTML structure and modern CSS styling. Include proper spacing, shadows, and hover effects if applicable.",
         "forms": "Create a form component with semantic HTML, accessible form elements, and clean CSS styling. Include proper labels and validation styling.",
         "typography": "Create a typography example with semantic HTML headings and text elements, styled with modern CSS. Focus on font hierarchy, spacing, and readability.",
@@ -1719,16 +1882,10 @@ def create_component_example(
 
     if component_css:
         output_parts.append("\n```css")
-        # Only include complete CSS rules, no truncation markers
-        # Get ALL CSS - no truncation
+        # Only include complete CSS rules that are related to this component
+        # Get ALL related CSS - no truncation
         css_limited = component_css
         output_parts.append(css_limited)
-        output_parts.append("```")
-
-    # Include JavaScript if available (no strict length limit, but prefer reasonable size)
-    if component_js:
-        output_parts.append("\n```javascript")
-        output_parts.append(component_js)
         output_parts.append("```")
 
     output_text = "\n".join(output_parts)
@@ -1756,9 +1913,8 @@ def create_grouped_example(
             + "\n<!-- ... more components ... -->"
         )
 
-    # Extract relevant CSS/JS
+    # Extract relevant CSS (only CSS that matches the combined components)
     combined_css = extract_css_for_component(combined_html, css_files)
-    combined_js = extract_js_for_component(combined_html, js_files)
 
     # Extract design keywords
     all_css = " ".join([css[1] for css in css_files])
@@ -1787,9 +1943,8 @@ def create_grouped_example(
 
     component_names = " + ".join([c.capitalize() for c in component_types])
     instruction_parts.append(
-        f"Task: Create a combined {component_names} component group with semantic HTML structure, "
-        "modern CSS for layout and styling, and clean JavaScript for interactivity. "
-        "Ensure components work together harmoniously. "
+        f"Task: Create a combined {component_names} component group with semantic HTML structure and "
+        "modern CSS for layout and styling. Ensure components work together harmoniously. "
         "Use placeholder images from https://picsum.photos/ with appropriate dimensions."
     )
 
@@ -1829,16 +1984,10 @@ def create_grouped_example(
 
     if combined_css:
         output_parts.append("\n```css")
-        # Only include complete CSS rules, no truncation markers
-        # Get ALL CSS - no truncation
+        # Only include complete CSS rules that are related to these components
+        # Get ALL related CSS - no truncation
         css_limited = combined_css
         output_parts.append(css_limited)
-        output_parts.append("```")
-
-    # Include JavaScript if available
-    if combined_js:
-        output_parts.append("\n```javascript")
-        output_parts.append(combined_js)
         output_parts.append("```")
 
     output_text = "\n".join(output_parts)
@@ -1898,9 +2047,8 @@ def create_training_example(
 
     # Main task focused on layout
     instruction_parts.append(
-        "Task: Create a complete, production-ready website layout with semantic HTML structure, "
-        "modern CSS for responsive design, and clean JavaScript for interactivity. "
-        "Focus on layout structure, spacing, typography, and visual hierarchy. "
+        "Task: Create a complete, production-ready website layout with semantic HTML structure and "
+        "modern CSS for responsive design. Focus on layout structure, spacing, typography, and visual hierarchy. "
         "Use placeholder images from https://picsum.photos/ with appropriate dimensions."
     )
 
@@ -1962,45 +2110,16 @@ def create_training_example(
     assistant_parts.append(html_preview)
     assistant_parts.append("```")
 
-    # Include CSS if available (focus on layout CSS)
+    # Include ALL CSS files (for full page examples, include all CSS)
     if css_files:
         assistant_parts.append("\n```css")
-        # Prioritize layout-related CSS
-        css_content = "\n\n/* " + css_files[0][0] + " */\n" + css_files[0][1]
-        if len(css_files) > 1:
-            css_content += f"\n\n/* ... {len(css_files) - 1} more CSS file(s) ... */"
+        # Include all CSS files for full page examples
+        css_parts = []
+        for css_file_name, css_file_content in css_files:
+            css_parts.append(f"/* {css_file_name} */\n{css_file_content}")
+        css_content = "\n\n".join(css_parts)
         assistant_parts.append(css_content)
         assistant_parts.append("```")
-
-    # Include JS if it's layout-related (navigation, responsive behavior, interactions)
-    if js_files:
-        # Check if JS is layout-related (navigation, menu, responsive, interactions)
-        js_content_lower = js_files[0][1].lower()
-        layout_js_keywords = [
-            "menu",
-            "nav",
-            "toggle",
-            "responsive",
-            "mobile",
-            "breakpoint",
-            "scroll",
-            "dropdown",
-            "modal",
-            "animation",
-            "transition",
-            "eventlistener",
-            "queryselector",
-            "getelementbyid",
-        ]
-        if any(keyword in js_content_lower for keyword in layout_js_keywords):
-            assistant_parts.append("\n```javascript")
-            js_content = "\n\n// " + js_files[0][0] + "\n" + js_files[0][1]
-            # Include additional JS files if they're also relevant and not too large
-            for js_file_name, js_file_content in js_files[1:]:
-                if len(js_file_content) < MAX_JS_LENGTH:
-                    js_content += f"\n\n// {js_file_name}\n{js_file_content}"
-            assistant_parts.append(js_content)
-            assistant_parts.append("```")
 
     assistant_response = "\n".join(assistant_parts)
 
@@ -2063,10 +2182,24 @@ def process_website_template(
             return []
 
         # Performance: Early exit for extremely large files
-        if len(html_content) > 5000000:  # 5MB limit
+        # Check file size before processing to avoid loading huge files into memory
+        try:
+            file_size_mb = index_path.stat().st_size / (1024 * 1024)
+            if file_size_mb > MAX_FILE_SIZE_MB:
+                logger.warning(
+                    f"Skipping {template_dir.name}: File too large ({file_size_mb:.2f} MB, limit: {MAX_FILE_SIZE_MB} MB)"
+                )
+                return []
+        except Exception as e:
+            logger.debug(f"Could not check file size for {index_path}: {e}")
+
+        if len(html_content) > 5000000:  # 5MB limit (fallback check)
             logger.warning(
                 f"Skipping {template_dir.name}: HTML too large ({len(html_content)} bytes)"
             )
+            # Explicit cleanup
+            del html_content
+            gc.collect()
             return []
 
         # Find and extract CSS/JS files (optimized: pass raw_html to avoid re-reading)
@@ -2198,6 +2331,16 @@ def process_website_template(
 
     except Exception as e:
         logger.error(f"Error processing {template_dir.name}: {e}", exc_info=True)
+    finally:
+        # Explicit cleanup to prevent memory leaks
+        try:
+            del html_content
+            del css_files
+            del js_files
+            del components
+            gc.collect()
+        except:
+            pass
 
     return examples
 
@@ -2257,7 +2400,9 @@ def build_dataset(
         return
 
     # Get all template directories
-    all_template_dirs = sorted([d for d in PROJECT_TEMPLATES_DIR.iterdir() if d.is_dir()])
+    all_template_dirs = sorted(
+        [d for d in PROJECT_TEMPLATES_DIR.iterdir() if d.is_dir()]
+    )
 
     if not all_template_dirs:
         logger.warning(f"No template directories found in {PROJECT_TEMPLATES_DIR}")
@@ -2269,14 +2414,20 @@ def build_dataset(
     # Handle start_from parameter (1-indexed)
     if start_from > 1:
         if start_from > total_templates_original:
-            logger.warning(f"start_from ({start_from}) exceeds total templates ({total_templates_original}). Starting from beginning.")
+            logger.warning(
+                f"start_from ({start_from}) exceeds total templates ({total_templates_original}). Starting from beginning."
+            )
             start_from = 1
             template_dirs = all_template_dirs
         else:
             skipped_count = start_from - 1
-            template_dirs = all_template_dirs[start_from - 1:]  # Convert to 0-indexed
-            logger.info(f"Resuming from template #{start_from} (skipping first {skipped_count} templates)")
-            logger.info(f"Processing {len(template_dirs)} remaining templates (out of {total_templates_original} total)")
+            template_dirs = all_template_dirs[start_from - 1 :]  # Convert to 0-indexed
+            logger.info(
+                f"Resuming from template #{start_from} (skipping first {skipped_count} templates)"
+            )
+            logger.info(
+                f"Processing {len(template_dirs)} remaining templates (out of {total_templates_original} total)"
+            )
     else:
         template_dirs = all_template_dirs
         logger.info(f"Processing all {len(template_dirs)} templates")
@@ -2313,7 +2464,7 @@ def build_dataset(
     # Performance: Batch write buffer (write every N examples instead of each one)
     BATCH_WRITE_SIZE = 10  # Write every 10 examples
     write_buffer = []
-    
+
     # Thread safety: Add locks for shared state
     hash_lock = threading.Lock()
     file_lock = threading.Lock()
@@ -2350,17 +2501,23 @@ def build_dataset(
 
                 # Process results as they complete
                 completed = 0
-                for future in as_completed(future_to_template, timeout=300):  # 5 minute timeout per template
+                for future in as_completed(
+                    future_to_template, timeout=300
+                ):  # 5 minute timeout per template
                     template_dir = future_to_template[future]
                     completed += 1
-                    current_number = start_from + completed - 1  # Show actual template number
+                    current_number = (
+                        start_from + completed - 1
+                    )  # Show actual template number
                     logger.info(
                         f"[{current_number}/{start_from + len(template_dirs) - 1}] Processing {template_dir.name}..."
                     )
 
                     try:
                         # Add timeout to prevent hanging
-                        template_examples = future.result(timeout=300)  # 5 minute timeout
+                        template_examples = future.result(
+                            timeout=300
+                        )  # 5 minute timeout
                         if template_examples:
                             # Filter out duplicates if in incremental mode (thread-safe)
                             new_examples = []
@@ -2388,7 +2545,8 @@ def build_dataset(
                                     with file_lock:
                                         for ex in write_buffer:
                                             output_file_handle.write(
-                                                json.dumps(ex, ensure_ascii=False) + "\n"
+                                                json.dumps(ex, ensure_ascii=False)
+                                                + "\n"
                                             )
                                         output_file_handle.flush()
                                     write_buffer.clear()
@@ -2414,7 +2572,9 @@ def build_dataset(
                         else:
                             skipped += 1
                     except FutureTimeoutError:
-                        logger.error(f"Timeout processing {template_dir.name} (exceeded 5 minutes)")
+                        logger.error(
+                            f"Timeout processing {template_dir.name} (exceeded 5 minutes)"
+                        )
                         errors += 1
                         skipped += 1
                     except Exception as e:
@@ -2437,11 +2597,16 @@ def build_dataset(
                             )
                         output_file_handle.flush()
                     write_buffer.clear()
+                    # Periodic garbage collection to prevent memory buildup
+                    if completed % 10 == 0:
+                        gc.collect()
         else:
             # Sequential processing (either parallel disabled, or using AI which requires sequential)
             if parallel and use_ai:
-                logger.info("Parallel processing disabled when using AI (API calls are sequential bottleneck)")
-            
+                logger.info(
+                    "Parallel processing disabled when using AI (API calls are sequential bottleneck)"
+                )
+
             # Sequential processing (original code, optimized)
             for i, template_dir in enumerate(template_dirs, 1):
                 current_number = start_from + i - 1  # Show actual template number
@@ -2503,6 +2668,11 @@ def build_dataset(
                             skipped += 1
                     else:
                         skipped += 1
+
+                    # Periodic garbage collection to prevent memory buildup
+                    if i % 10 == 0:
+                        gc.collect()
+
                 except Exception as e:
                     logger.error(f"Error processing {template_dir.name}: {e}")
                     errors += 1
@@ -2520,6 +2690,7 @@ def build_dataset(
                     output_file_handle.write(json.dumps(ex, ensure_ascii=False) + "\n")
                 output_file_handle.flush()
                 write_buffer.clear()
+                gc.collect()
     finally:
         # Close the file handle
         if output_file_handle:
@@ -2676,7 +2847,6 @@ def parse_code_blocks(output: str) -> Dict[str, str]:
     code_blocks = {
         "html": "",
         "css": "",
-        "javascript": "",
         "reasoning": "",
     }
 
@@ -2698,11 +2868,6 @@ def parse_code_blocks(output: str) -> Dict[str, str]:
         css_content = css_match.group(1).strip()
         # Try to fix incomplete CSS
         code_blocks["css"] = fix_incomplete_css(css_content)
-
-    # Extract JavaScript block
-    js_match = re.search(r"```javascript\s*\n(.*?)```", output, re.DOTALL)
-    if js_match:
-        code_blocks["javascript"] = js_match.group(1).strip()
 
     return code_blocks
 
@@ -2779,12 +2944,6 @@ def export_examples_to_folders(examples: List[Dict]):
 
                 # If it's just a fragment, wrap it in a basic HTML structure
                 if not is_complete_html:
-                    # Only add script tag if there's JS
-                    script_tag = (
-                        '\n    <script src="script.js"></script>'
-                        if code_blocks["javascript"]
-                        else ""
-                    )
                     html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2794,7 +2953,7 @@ def export_examples_to_folders(examples: List[Dict]):
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-{html_content}{script_tag}
+{html_content}
 </body>
 </html>"""
 
@@ -2806,12 +2965,6 @@ def export_examples_to_folders(examples: List[Dict]):
                 css_file = example_folder / "style.css"
                 with open(css_file, "w", encoding="utf-8") as f:
                     f.write(code_blocks["css"])
-
-            # Save JavaScript
-            if code_blocks["javascript"]:
-                js_file = example_folder / "script.js"
-                with open(js_file, "w", encoding="utf-8") as f:
-                    f.write(code_blocks["javascript"])
 
             # Save full output for reference
             output_file = example_folder / "output.txt"
@@ -2829,7 +2982,7 @@ def export_examples_to_folders(examples: List[Dict]):
         f"  - Each example is in its own folder (example_0001, example_0002, etc.)"
     )
     logger.info(
-        f"  - Files: instruction.txt, reasoning.txt, index.html, style.css, script.js, output.txt"
+        f"  - Files: instruction.txt, reasoning.txt, index.html, style.css, output.txt"
     )
 
 
