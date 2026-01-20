@@ -164,7 +164,7 @@ if dataset_size < min_examples_per_step:
 # Training arguments
 training_args = TrainingArguments(
     output_dir=output_dir,
-    num_train_epochs=10,
+    num_train_epochs=1,
     per_device_train_batch_size=per_device_batch_size,
     gradient_accumulation_steps=gradient_accumulation_steps,
     learning_rate=1e-4,
